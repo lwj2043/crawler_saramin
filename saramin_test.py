@@ -4,7 +4,7 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 import re
 from bs4 import BeautifulSoup
 import emoji
-
+# VS Code 연동 테스트를 위한 주석
 # --- 설정 ---
 KEYWORDS = ['IT', '자율주행', '모빌리티']
 TARGET_JOB_COUNT = 30  # 키워드별 수집할 목표 공고 개수
