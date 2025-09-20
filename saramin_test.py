@@ -2,8 +2,8 @@ import asyncio
 import pandas as pd
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 import re
-from bs4 import BeautifulSoup
 import emoji
+
 # VS Code 연동 테스트를 위한 주석
 # --- 설정 ---
 KEYWORDS = ['IT', '자율주행', '모빌리티']
@@ -24,7 +24,7 @@ def clean_text(text):
     text = emoji.replace_emoji(text, replace='')
 
     # 2. 지정된 모든 특수기호(ㆍ, >, [, ] 등)를 공백으로 변환
-    text = re.sub(r'[•\-\·=|※ㆍ>\[\]]', ' ', text)
+    text = re.sub(r'[•◎\-\·⁃=|※ㆍ●>[\]]', ' ', text)
 
     # 3. 한글과 영어/숫자 사이에 일관된 공백 추가 (가독성 향상)
     text = re.sub(r'([가-힣])([A-Za-z0-9])', r'\1 \2', text)
@@ -48,36 +48,39 @@ def clean_text(text):
     # 8. 전체 텍스트의 앞뒤 공백 최종 제거
     return text.strip()
 
-# --- 상세 내용 파싱 ---
-def parse_responsibilities_robust(html_content, fallback_text):
-    soup = BeautifulSoup(html_content, 'lxml')
-    start_keywords = re.compile(r'담당\s*업무|주요\s*업무|업무\s*내용')
-    end_keywords = re.compile(r'자격\s*요건|지원\s*자격|필수\s*역량|우대\s*사항')
-    
-    start_tag = soup.find(lambda tag: tag.get_text(strip=True) and start_keywords.search(tag.get_text()))
-    if start_tag:
-        content_parts = []
-        for sibling in start_tag.find_next_siblings():
-            if sibling.get_text(strip=True) and end_keywords.search(sibling.get_text()):
-                break
-            if sibling.get_text(strip=True):
-                content_parts.append(sibling.get_text(separator='\n', strip=True))
-        if content_parts:
-            return '\n'.join(content_parts)
+# --- 상세 내용 파싱 (개선된 로직) ---
+async def parse_detail(content_context):
+    """
+    상세 페이지의 내용을 파싱하여 채용 공고 본문을 추출합니다.
+    - 이미지 기반 공고인 경우 None을 반환합니다.
+    - 텍스트 기반 공고인 경우, 여러 선택자를 시도하여 내용을 추출합니다.
+    """
+    # 1. 이미지 기반 공고인지 확인 (view_img가 포함된 src를 가진 img 태그)
+    try:
+        img_locator = content_context.locator('img[src*="view_img"]')
+        if await img_locator.count() > 0:
+            body_text = await content_context.locator('body').inner_text()
+            if len(body_text.strip()) < 200:  # 텍스트가 거의 없으면 이미지 공고로 간주
+                return None
+    except Exception:
+        pass
 
-    all_text = soup.get_text()
-    start_match = start_keywords.search(all_text)
-    if start_match:
-        text_after_start = all_text[start_match.end():]
-        end_match = end_keywords.search(text_after_start)
-        if end_match:
-            text_after_start = text_after_start[:end_match.start()]
-        if text_after_start.strip():
-            return text_after_start
-        
-    return fallback_text
+    # 2. 텍스트 기반 공고 내용 추출 (여러 선택자 시도)
+    selectors = ['.job_description', '.content', '.rec_cont']
+    for selector in selectors:
+        try:
+            element = content_context.locator(selector).first
+            if await element.is_visible():
+                text = await element.inner_text()
+                if text and len(text.strip()) > 100:
+                    return text
+        except Exception:
+            continue
 
-# --- 크롤링 (기존과 동일) ---
+    # 3. 위 방법으로 찾지 못한 경우, body 전체 텍스트를 사용 (Fallback)
+    return await content_context.locator('body').inner_text()
+
+# --- 크롤링 ---
 async def scrape_saramin(page, keyword):
     print(f"사람인에서 '{keyword}' 키워드 검색 시작 (목표: {TARGET_JOB_COUNT}개)")
     base_info_list = []
@@ -124,25 +127,25 @@ async def scrape_saramin(page, keyword):
             except PlaywrightTimeoutError:
                 pass
             
-            body_locator = content_context.locator('body')
-            html_content = await body_locator.inner_html()
-            inner_text = await body_locator.inner_text()
+            # 개선된 파싱 함수 호출
+            responsibilities_raw = await parse_detail(content_context)
             
-            responsibilities_raw = parse_responsibilities_robust(html_content, inner_text)
-            
-            # --- 최종 정제 적용 ---
-            responsibilities_clean = clean_text(responsibilities_raw)
+            if responsibilities_raw is None:
+                responsibilities_clean = None  # 이미지 공고는 None으로 처리
+            else:
+                responsibilities_clean = clean_text(responsibilities_raw)
             
             base_info['source'] = "사람인"
             base_info['keyword'] = keyword
             base_info['responsibilities'] = responsibilities_clean
             detailed_jobs.append(base_info)
             print(f"[{keyword}] {i + 1}번째 공고 처리 완료: {base_info['title']}")
-        except Exception:
-            print(f"[{keyword}] {i + 1}번째 공고 처리 실패: {base_info.get('link', '알 수 없는 URL')}")
+        except Exception as e:
+            print(f"[{keyword}] {i + 1}번째 공고 처리 실패: {base_info.get('link', '알 수 없는 URL')} - {e}")
 
     await page.close()
     return detailed_jobs
+
 
 # --- 메인 실행 (기존과 동일) ---
 async def main():
